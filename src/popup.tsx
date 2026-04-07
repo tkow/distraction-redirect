@@ -319,25 +319,29 @@ const Popup = () => {
 
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!fileInputRef.current) return;
-    fileInputRef.current.value = ''; // reset so same file can be re-imported
     if (!file) return;
 
-    const text = await file.text();
-    const hostnames = parseImportFile(text);
+    try {
+      const text = await file.text();
+      const hostnames = parseImportFile(text);
 
-    if (hostnames.length === 0) {
-      setImportStatus({ ok: false, msg: 'File is empty or has no valid entries' });
-      return;
-    }
+      if (hostnames.length === 0) {
+        setImportStatus({ ok: false, msg: 'File is empty or has no valid entries' });
+        return;
+      }
 
-    const res = await chrome.runtime.sendMessage({ type: 'SYNC_DOMAINS', hostnames });
-    if (res?.success) {
-      setImportStatus({ ok: true, msg: `Synced ${hostnames.length} entr${hostnames.length === 1 ? 'y' : 'ies'} from ${file.name}` });
-    } else {
-      setImportStatus({ ok: false, msg: res?.error ?? 'Import failed' });
+      const res = await chrome.runtime.sendMessage({ type: 'SYNC_DOMAINS', hostnames });
+      setImportStatus(res?.success
+        ? { ok: true, msg: `Synced ${hostnames.length} entr${hostnames.length === 1 ? 'y' : 'ies'} from ${file.name}` }
+        : { ok: false, msg: res?.error ?? 'Import failed' }
+      );
+    } catch (err) {
+      setImportStatus({ ok: false, msg: String(err) });
+    } finally {
+      // Reset after reading so the same file can be re-imported
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      setTimeout(() => setImportStatus(null), 4000);
     }
-    setTimeout(() => setImportStatus(null), 4000);
   }, []);
 
   return (
