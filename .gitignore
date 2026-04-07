@@ -4,3 +4,4 @@ public/js
 dist
 wakarango
 *.zip
+settings.local.json

@@ -1,199 +1,442 @@
-import React, {
-  useEffect,
-  useState,
-  useMemo,
-  useCallback,
-  CSSProperties,
-} from "react";
-import { createRoot } from "react-dom/client";
-import { Item } from "./types";
-import ListItem from "./components/ListItem";
-import SearchBox from "./components/SearchBox";
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
+import { BlockedDomain } from './types';
 
-const radioButtonStyle: CSSProperties = {
-  display: "flex",
-  margin: "0px 10px",
-};
+const STORAGE_KEY = 'blockedDomains';
+const REDIRECT_URL_KEY = 'redirectUrl';
+const DEFAULT_REDIRECT_URL = 'https://github.com';
+const PROTECTED = ['github.com'];
 
-const radioButtonInputStyle: CSSProperties = {
-  margin: "0px 2px",
-};
+const HOSTNAME_RE = /^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
 
-const radioButtonInputLayoutStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  margin: "0px 2px",
-};
+function normalizeHostname(input: string): string {
+  return input.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^www\./, '');
+}
 
-const radioButtonAreaStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-};
+function isProtected(h: string) {
+  return PROTECTED.some((p) => h === p || h.endsWith(`.${p}`));
+}
 
-const searchBoxStyle: CSSProperties = {
-  margin: "8px 14px 0px",
-};
+function RedirectUrlConfig() {
+  const [saved, setSaved] = useState(DEFAULT_REDIRECT_URL);
+  const [draft, setDraft] = useState(DEFAULT_REDIRECT_URL);
+  const [editing, setEditing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-const listStyle: CSSProperties = {
-  maxHeight: '86vh',
-  overflowY: 'scroll',
-  width: "400px"
+  useEffect(() => {
+    chrome.storage.local.get(REDIRECT_URL_KEY).then((result) => {
+      const url = result[REDIRECT_URL_KEY] ?? DEFAULT_REDIRECT_URL;
+      setSaved(url);
+      setDraft(url);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (editing) inputRef.current?.focus();
+  }, [editing]);
+
+  const handleSave = async () => {
+    const trimmed = draft.trim();
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        setError('Must be an http or https URL');
+        return;
+      }
+    } catch {
+      setError('Invalid URL');
+      return;
+    }
+    await chrome.storage.local.set({ [REDIRECT_URL_KEY]: trimmed });
+    setSaved(trimmed);
+    setEditing(false);
+    setError(null);
+  };
+
+  const handleDiscard = () => {
+    setDraft(saved);
+    setEditing(false);
+    setError(null);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') handleSave();
+    if (e.key === 'Escape') handleDiscard();
+  };
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <p style={{ margin: '0 0 4px', fontSize: 11, color: '#888', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+        Redirect to
+      </p>
+      {editing ? (
+        <>
+          <input
+            ref={inputRef}
+            type="url"
+            value={draft}
+            onChange={(e) => { setDraft(e.target.value); setError(null); }}
+            onKeyDown={handleKeyDown}
+            style={{
+              width: '100%',
+              padding: '7px 8px',
+              border: `1px solid ${error ? '#e63946' : '#ddd'}`,
+              borderRadius: 6,
+              fontSize: 13,
+              boxSizing: 'border-box',
+              marginBottom: 6,
+              outline: 'none',
+            }}
+          />
+          {error && <p style={{ color: '#e63946', fontSize: 12, margin: '0 0 6px' }}>{error}</p>}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={handleSave}
+              style={{
+                flex: 1, padding: '6px', background: '#e63946', color: 'white',
+                border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 500,
+              }}
+            >
+              Save
+            </button>
+            <button
+              onClick={handleDiscard}
+              style={{
+                flex: 1, padding: '6px', background: 'white', color: '#666',
+                border: '1px solid #ddd', borderRadius: 6, cursor: 'pointer', fontSize: 12,
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </>
+      ) : (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+          <span style={{ fontSize: 13, color: '#333', wordBreak: 'break-all' }}>{saved}</span>
+          <button
+            onClick={() => setEditing(true)}
+            style={{
+              flexShrink: 0, background: 'none', border: '1px solid #ddd',
+              borderRadius: 4, padding: '2px 10px', cursor: 'pointer', fontSize: 12, color: '#555',
+            }}
+          >
+            Edit
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+async function getCurrentHostname(): Promise<string | null> {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.url) return null;
+  try {
+    const url = new URL(tab.url);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    return url.hostname.replace(/^www\./, '');
+  } catch {
+    return null;
+  }
+}
+
+function CurrentSiteBlock({
+  domains,
+}: {
+  domains: BlockedDomain[];
+}) {
+  const [currentHost, setCurrentHost] = useState<string | null>(null);
+  const [blocking, setBlocking] = useState(false);
+
+  useEffect(() => {
+    getCurrentHostname().then(setCurrentHost);
+  }, []);
+
+  if (!currentHost || isProtected(currentHost)) return null;
+
+  const isBlocked = domains.some((d) => d.hostname === currentHost);
+
+  const handleBlock = async () => {
+    setBlocking(true);
+    await chrome.runtime.sendMessage({ type: 'ADD_DOMAIN', hostname: currentHost });
+    setBlocking(false);
+  };
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '10px 12px',
+        marginBottom: 12,
+        background: '#f7f7f7',
+        borderRadius: 8,
+        border: '1px solid #eee',
+      }}
+    >
+      <span style={{ fontSize: 13, color: '#333', wordBreak: 'break-all', marginRight: 8 }}>
+        {currentHost}
+      </span>
+      {isBlocked ? (
+        <span style={{ flexShrink: 0, fontSize: 12, color: '#2e7d32', fontWeight: 500 }}>
+          ✓ Blocked
+        </span>
+      ) : (
+        <button
+          onClick={handleBlock}
+          disabled={blocking}
+          style={{
+            flexShrink: 0,
+            padding: '4px 12px',
+            background: blocking ? '#aaa' : '#e63946',
+            color: 'white',
+            border: 'none',
+            borderRadius: 6,
+            cursor: blocking ? 'not-allowed' : 'pointer',
+            fontSize: 12,
+            fontWeight: 500,
+          }}
+        >
+          {blocking ? 'Blocking…' : 'Block'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function DomainItem({
+  hostname,
+  onRemove,
+}: {
+  hostname: string;
+  onRemove: (h: string) => void;
+}) {
+  return (
+    <li
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '8px 0',
+        borderBottom: '1px solid #f0f0f0',
+      }}
+    >
+      <span style={{ fontSize: 13, color: '#333', wordBreak: 'break-all' }}>{hostname}</span>
+      <button
+        onClick={() => onRemove(hostname)}
+        style={{
+          flexShrink: 0,
+          marginLeft: 8,
+          background: 'none',
+          border: '1px solid #ddd',
+          borderRadius: 4,
+          padding: '2px 10px',
+          cursor: 'pointer',
+          fontSize: 12,
+          color: '#e63946',
+        }}
+      >
+        Remove
+      </button>
+    </li>
+  );
+}
+
+function AddDomainForm({
+  onSaved,
+  onDiscard,
+}: {
+  onSaved: () => void;
+  onDiscard: () => void;
+}) {
+  const [value, setValue] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    const hostname = normalizeHostname(value);
+
+    if (!HOSTNAME_RE.test(hostname)) {
+      setError('Enter a valid domain, e.g. twitter.com');
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+
+    const addRes = await chrome.runtime.sendMessage({ type: 'ADD_DOMAIN', hostname });
+    if (!addRes.success) {
+      setError(addRes.error ?? 'Failed to add domain');
+      setSaving(false);
+      return;
+    }
+
+    onSaved();
+  }, [value, onSaved]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter') handleSave();
+      if (e.key === 'Escape') onDiscard();
+    },
+    [handleSave, onDiscard]
+  );
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value);
+          setError(null);
+        }}
+        onKeyDown={handleKeyDown}
+        placeholder="e.g. twitter.com"
+        disabled={saving}
+        style={{
+          width: '100%',
+          padding: '8px',
+          border: `1px solid ${error ? '#e63946' : '#ddd'}`,
+          borderRadius: 6,
+          fontSize: 13,
+          boxSizing: 'border-box',
+          marginBottom: 6,
+          outline: 'none',
+        }}
+      />
+      {error && (
+        <p style={{ color: '#e63946', fontSize: 12, margin: '0 0 6px' }}>{error}</p>
+      )}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          onClick={handleSave}
+          disabled={saving || !value.trim()}
+          style={{
+            flex: 1,
+            padding: '8px',
+            background: saving || !value.trim() ? '#ccc' : '#e63946',
+            color: 'white',
+            border: 'none',
+            borderRadius: 6,
+            cursor: saving || !value.trim() ? 'not-allowed' : 'pointer',
+            fontSize: 13,
+            fontWeight: 500,
+          }}
+        >
+          {saving ? 'Checking…' : 'Save'}
+        </button>
+        <button
+          onClick={onDiscard}
+          disabled={saving}
+          style={{
+            flex: 1,
+            padding: '8px',
+            background: 'white',
+            color: '#666',
+            border: '1px solid #ddd',
+            borderRadius: 6,
+            cursor: saving ? 'not-allowed' : 'pointer',
+            fontSize: 13,
+          }}
+        >
+          Discard
+        </button>
+      </div>
+    </div>
+  );
 }
 
 const Popup = () => {
-  const [vocabularies, setVocabularies] = useState<Record<string, Item>>({});
-  const [display, setDisplay] = useState<"show" | "hidden">("show");
-  const [order, setOrder] = useState<"count-desc" | "count-asc">("count-desc");
-  const [searchText, setSearchText] = useState<string>("");
+  const [domains, setDomains] = useState<BlockedDomain[]>([]);
+  const [isAdding, setIsAdding] = useState(false);
 
   useEffect(() => {
-    const listener = async function (
-      request: any,
-      sender: chrome.runtime.MessageSender,
-      sendResponse: (response?: any) => void
-    ) {
-      if (request.event === "updateStorage") {
-        await chrome.storage.local.get().then((values) => {
-          setVocabularies(values);
-        });
+    chrome.storage.local.get(STORAGE_KEY).then((result) => {
+      setDomains(result[STORAGE_KEY] ?? []);
+    });
+
+    const listener = (changes: { [key: string]: chrome.storage.StorageChange }) => {
+      if (changes[STORAGE_KEY]) {
+        setDomains(changes[STORAGE_KEY].newValue ?? []);
       }
     };
-    chrome.runtime.onMessage.addListener(listener);
-    return () => {
-      chrome.runtime.onMessage.removeListener(listener);
-    };
+    chrome.storage.onChanged.addListener(listener);
+    return () => chrome.storage.onChanged.removeListener(listener);
   }, []);
 
-  useEffect(() => {
-    chrome.storage.local.get().then((values) => {
-      setVocabularies(values);
-    });
-    return () => {
-      setVocabularies({});
-    };
+  const handleRemove = useCallback(async (hostname: string) => {
+    await chrome.runtime.sendMessage({ type: 'REMOVE_DOMAIN', hostname });
   }, []);
 
-  const list = useMemo(() => {
-    return Object.entries(vocabularies)
-      .map(([word, detail]) => {
-        return {
-          word,
-          referenceCount: detail.referenceCount,
-          hidden: detail.hidden,
-        };
-      })
-      .filter((value) => {
-        return value.word.includes(searchText) && display === "show" ? !value.hidden : value.hidden;
-      })
-      .sort((a, b) => {
-        if (order === "count-asc") return a.referenceCount - b.referenceCount;
-        return b.referenceCount - a.referenceCount;
-      });
-  }, [vocabularies, display, order, searchText]);
+  const handleSaved = useCallback(() => {
+    setIsAdding(false);
+  }, []);
 
-  const onRemoveEvent = useCallback(async (_word: string) => {
-    const values = await chrome.storage.local.get();
-    setVocabularies(values);
+  const handleDiscard = useCallback(() => {
+    setIsAdding(false);
   }, []);
 
   return (
-    <div>
-      <div style={radioButtonAreaStyle}>
-        <div style={radioButtonStyle}>
-          <div style={radioButtonInputLayoutStyle}>
-            <input
-              style={radioButtonInputStyle}
-              type="radio"
-              id="show"
-              name="display"
-              value="show"
-              onChange={() => {
-                setDisplay("show");
-              }}
-              checked={display === "show"}
-            />
-            <label htmlFor="show">単語リスト</label>
-          </div>
-          <div style={radioButtonInputLayoutStyle}>
-            <input
-              style={radioButtonInputStyle}
-              type="radio"
-              id="hidden"
-              name="display"
-              value="hidden"
-              onChange={() => {
-                setDisplay("hidden");
-              }}
-              checked={display === "hidden"}
-            />
-            <label htmlFor="hidden">非表示</label>
-          </div>
-        </div>
-        <div style={radioButtonStyle}>
-          <div style={radioButtonInputLayoutStyle}>
-            <input
-              style={radioButtonInputStyle}
-              type="radio"
-              id="count-desc"
-              name="count_order"
-              value="count-desc"
-              onChange={() => {
-                setOrder("count-desc");
-              }}
-              checked={order === "count-desc"}
-            />
-            <label htmlFor="count-desc">確認回数:降順</label>
-          </div>
-          <div style={radioButtonInputLayoutStyle}>
-            <input
-              style={radioButtonInputStyle}
-              type="radio"
-              id="count-asc"
-              name="count_order"
-              value="count-asc"
-              onChange={() => {
-                setOrder("count-asc");
-              }}
-              checked={order === "count-asc"}
-            />
-            <label htmlFor="count-asc">確認回数:昇順</label>
-          </div>
-        </div>
+    <div style={{ width: 340, fontFamily: 'system-ui, -apple-system, sans-serif', padding: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <span style={{ fontSize: 20 }}>🚫</span>
+        <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: '#1a1a2e' }}>
+          Distraction Redirect
+        </h2>
       </div>
-      <SearchBox
-        style={searchBoxStyle}
-        value={searchText}
-        onChangeSearchText={setSearchText}
-      />
-      {list.length === 0 && !searchText && (
-        <ul style={listStyle}>まだ登録された単語がありません。</ul>
+      <RedirectUrlConfig />
+
+      <CurrentSiteBlock domains={domains} />
+
+      {domains.length === 0 && (
+        <p style={{ color: '#aaa', fontSize: 13, textAlign: 'center', padding: '16px 0' }}>
+          No sites blocked yet.
+        </p>
       )}
-      {list.length === 0 && !!searchText && (
-        <ul style={listStyle}>検索結果はありませんでした。</ul>
-      )}
-      {list.length > 0 && (
-        <ul style={listStyle}>
-          {list.map(({ word, referenceCount, hidden }) => {
-            return (
-              <ListItem
-                key={word}
-                word={word}
-                referenceCount={referenceCount}
-                onHideItem={onRemoveEvent}
-                onRemoveItem={onRemoveEvent}
-                hidden={hidden}
-              />
-            );
-          })}
+
+      {domains.length > 0 && (
+        <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 12px', maxHeight: 240, overflowY: 'auto' }}>
+          {domains.map((d) => (
+            <DomainItem key={d.hostname} hostname={d.hostname} onRemove={handleRemove} />
+          ))}
         </ul>
       )}
+
+      {!isAdding && (
+        <button
+          onClick={() => setIsAdding(true)}
+          style={{
+            width: '100%',
+            padding: '9px',
+            background: '#e63946',
+            color: 'white',
+            border: 'none',
+            borderRadius: 6,
+            cursor: 'pointer',
+            fontSize: 13,
+            fontWeight: 500,
+          }}
+        >
+          + Add Domain
+        </button>
+      )}
+
+      {isAdding && <AddDomainForm onSaved={handleSaved} onDiscard={handleDiscard} />}
     </div>
   );
 };
 
-const ReactDOM = createRoot(document.getElementById("root")!);
-
-ReactDOM.render(
+const root = createRoot(document.getElementById('root')!);
+root.render(
   <React.StrictMode>
     <Popup />
   </React.StrictMode>

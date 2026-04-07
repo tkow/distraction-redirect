@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+
+  "name": "Distraction Redirect",
+  "description": "Redirects distracting websites to GitHub so you stay focused.",
+  "version": "1.0",
+
+  "action": {
+    "default_icon": {
+      "16": "icon-16.png",
+      "48": "icon-48.png",
+      "128": "icon.png"
+    },
+    "default_popup": "src/popup.html"
+  },
+
+  "icons": {
+    "16": "icon-16.png",
+    "48": "icon-48.png",
+    "128": "icon.png"
+  },
+
+  "background": {
+    "service_worker": "src/background.ts",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content.ts"],
+      "run_at": "document_end"
+    }
+  ],
+
+  "permissions": ["storage", "declarativeNetRequest", "activeTab"],
+
+  "host_permissions": ["<all_urls>"]
+}
