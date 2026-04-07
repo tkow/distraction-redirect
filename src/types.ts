@@ -6,7 +6,8 @@ export type BlockedDomain = {
 export type Message =
   | { type: 'ADD_DOMAIN'; hostname: string }
   | { type: 'REMOVE_DOMAIN'; hostname: string }
-  | { type: 'VALIDATE_DOMAIN'; hostname: string };
+  | { type: 'VALIDATE_DOMAIN'; hostname: string }
+  | { type: 'SYNC_DOMAINS'; hostnames: string[] };
 
 export type MessageResponse =
   | { success: true; domains?: BlockedDomain[] }

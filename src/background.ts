@@ -144,6 +144,25 @@ chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) =
         sendResponse({ success: true });
         return;
       }
+
+      if (message.type === 'SYNC_DOMAINS') {
+        // Filter out entries that would block the redirect target.
+        const incoming = message.hostnames.filter((h) => !isProtected(h, redirectUrl));
+        const incomingSet = new Set(incoming);
+        const current = await getBlockedDomains();
+        // Preserve existing entries that appear in the file (keeps addedAt etc.).
+        const kept = current.filter((d) => incomingSet.has(d.hostname));
+        const keptSet = new Set(kept.map((d) => d.hostname));
+        // Add entries from the file that aren't already in the list.
+        const added: BlockedDomain[] = incoming
+          .filter((h) => !keptSet.has(h))
+          .map((h) => ({ hostname: h, addedAt: Date.now() }));
+        const updated = [...kept, ...added];
+        await saveBlockedDomains(updated);
+        await updateRedirectRules(updated, redirectUrl);
+        sendResponse({ success: true });
+        return;
+      }
     } catch (e) {
       sendResponse({ success: false, error: String(e) });
     }

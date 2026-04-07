@@ -280,10 +280,19 @@ function AddDomainForm({ onSaved, onDiscard }: { onSaved: () => void; onDiscard:
   );
 }
 
+function parseImportFile(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^["']|["']$/g, '')) // strip surrounding quotes (CSV)
+    .filter((line) => line.length > 0);
+}
+
 const Popup = () => {
   const [domains, setDomains] = useState<BlockedDomain[]>([]);
   const [isAdding, setIsAdding] = useState(false);
   const [privacy, setPrivacy] = useState(false);
+  const [importStatus, setImportStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     chrome.storage.local.get([STORAGE_KEY, PRIVACY_KEY]).then((result) => {
@@ -307,6 +316,29 @@ const Popup = () => {
     setPrivacy(next);
     chrome.storage.local.set({ [PRIVACY_KEY]: next });
   }, [privacy]);
+
+  const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!fileInputRef.current) return;
+    fileInputRef.current.value = ''; // reset so same file can be re-imported
+    if (!file) return;
+
+    const text = await file.text();
+    const hostnames = parseImportFile(text);
+
+    if (hostnames.length === 0) {
+      setImportStatus({ ok: false, msg: 'File is empty or has no valid entries' });
+      return;
+    }
+
+    const res = await chrome.runtime.sendMessage({ type: 'SYNC_DOMAINS', hostnames });
+    if (res?.success) {
+      setImportStatus({ ok: true, msg: `Synced ${hostnames.length} entr${hostnames.length === 1 ? 'y' : 'ies'} from ${file.name}` });
+    } else {
+      setImportStatus({ ok: false, msg: res?.error ?? 'Import failed' });
+    }
+    setTimeout(() => setImportStatus(null), 4000);
+  }, []);
 
   return (
     <div style={{ width: 340, fontFamily: 'system-ui, -apple-system, sans-serif', padding: 16 }}>
@@ -348,12 +380,34 @@ const Popup = () => {
       )}
 
       {!isAdding && (
-        <button
-          onClick={() => setIsAdding(true)}
-          style={{ width: '100%', padding: '9px', background: '#e63946', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 500 }}
-        >
-          + Add Domain
-        </button>
+        <>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={() => setIsAdding(true)}
+              style={{ flex: 1, padding: '9px', background: '#e63946', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 500 }}
+            >
+              + Add Domain
+            </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              style={{ flex: 1, padding: '9px', background: 'white', color: '#333', border: '1px solid #ddd', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
+            >
+              Import file
+            </button>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,.csv"
+            style={{ display: 'none' }}
+            onChange={handleFileChange}
+          />
+          {importStatus && (
+            <p style={{ margin: '8px 0 0', fontSize: 12, color: importStatus.ok ? '#2e7d32' : '#e63946', textAlign: 'center' }}>
+              {importStatus.msg}
+            </p>
+          )}
+        </>
       )}
 
       {isAdding && <AddDomainForm onSaved={() => setIsAdding(false)} onDiscard={() => setIsAdding(false)} />}
