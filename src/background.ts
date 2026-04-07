@@ -22,57 +22,66 @@ function redirectHostname(redirectUrl: string): string {
   return new URL(redirectUrl).hostname.replace(/^www\./, '');
 }
 
-/** Returns true if the given url is matched by the blocked domain entry. */
+function escapeRegex(s: string): string {
+  return s.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Match a plain/wildcard pattern against a hostname. * is a free-length wildcard. Exact match for plain patterns. */
+function matchesPattern(pattern: string, hostname: string): boolean {
+  if (pattern.includes('*')) {
+    return new RegExp(`^${escapeRegex(pattern).replace(/\*/g, '.*')}$`).test(hostname);
+  }
+  return hostname === pattern;
+}
+
+/**
+ * Build a urlFilter for declarativeNetRequest from a plain/wildcard pattern.
+ * |  = left-anchor (URL must start here)
+ * *  = wildcard covering the protocol (http/https)
+ * ^  = separator character (matches /, ?, # or end-of-URL) — ensures exact hostname match,
+ *      not a suffix match (e.g. sharelot.jp does NOT match store.sharelot.jp).
+ */
+function patternToUrlFilter(pattern: string): string {
+  return `|*://${pattern}^`;
+}
+
 function domainMatchesUrl(domain: BlockedDomain, url: string): boolean {
   if (domain.isRegex) {
     try { return new RegExp(domain.hostname).test(url); } catch { return false; }
   }
   try {
     const h = new URL(url).hostname.replace(/^www\./, '');
-    return h === domain.hostname || h.endsWith(`.${domain.hostname}`);
+    return matchesPattern(domain.hostname, h);
   } catch {
     return false;
   }
 }
 
 function isProtected(hostname: string, redirectUrl: string): boolean {
-  const rh = redirectHostname(redirectUrl);
-  return hostname === rh || hostname.endsWith(`.${rh}`);
+  return hostname === redirectHostname(redirectUrl);
 }
 
 async function updateRedirectRules(domains: BlockedDomain[], redirectUrl: string): Promise<void> {
-  // Exclude any entry that would redirect the redirect target itself (loop prevention).
+  // Exclude entries that would also redirect the redirect target (loop prevention).
   const safeDomains = domains.filter((d) => !domainMatchesUrl(d, redirectUrl));
 
   const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
   const existingIds = existingRules.map((r) => r.id);
 
-  const newRules: chrome.declarativeNetRequest.Rule[] = safeDomains.map((domain, index) => {
-    const base = {
-      id: index + 1,
-      priority: 1,
-      action: {
-        type: 'redirect' as chrome.declarativeNetRequest.RuleActionType,
-        redirect: { url: redirectUrl },
-      },
-    };
-    if (domain.isRegex) {
-      return {
-        ...base,
-        condition: {
-          regexFilter: domain.hostname,
-          resourceTypes: ['main_frame' as chrome.declarativeNetRequest.ResourceType],
-        },
-      };
-    }
-    return {
-      ...base,
-      condition: {
-        urlFilter: `||${domain.hostname}/`,
-        resourceTypes: ['main_frame' as chrome.declarativeNetRequest.ResourceType],
-      },
-    };
-  });
+  const newRules: chrome.declarativeNetRequest.Rule[] = safeDomains.map((domain, index) => ({
+    id: index + 1,
+    priority: 1,
+    action: {
+      type: 'redirect' as chrome.declarativeNetRequest.RuleActionType,
+      redirect: { url: redirectUrl },
+    },
+    condition: {
+      ...(domain.isRegex
+        ? { regexFilter: domain.hostname }
+        : { urlFilter: patternToUrlFilter(domain.hostname) }),
+      resourceTypes: ['main_frame' as chrome.declarativeNetRequest.ResourceType],
+    },
+  }));
 
   await chrome.declarativeNetRequest.updateDynamicRules({
     removeRuleIds: existingIds,
@@ -80,10 +89,35 @@ async function updateRedirectRules(domains: BlockedDomain[], redirectUrl: string
   });
 }
 
+async function validateDomain(hostname: string): Promise<{ valid: boolean; error?: string }> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    await fetch(`https://${hostname}`, { method: 'HEAD', signal: controller.signal });
+    clearTimeout(timeoutId);
+    return { valid: true };
+  } catch (e) {
+    if (e instanceof Error && e.name === 'AbortError') {
+      return { valid: false, error: 'Request timed out — site may not exist' };
+    }
+    return { valid: false, error: 'Could not reach site — check the domain name' };
+  }
+}
+
 chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) => {
   (async () => {
     try {
       const redirectUrl = await getRedirectUrl();
+
+      if (message.type === 'VALIDATE_DOMAIN') {
+        if (isProtected(message.hostname, redirectUrl)) {
+          sendResponse({ success: false, error: 'Cannot block the redirect target' });
+          return;
+        }
+        const result = await validateDomain(message.hostname);
+        sendResponse(result.valid ? { success: true } : { success: false, error: result.error });
+        return;
+      }
 
       if (message.type === 'ADD_DOMAIN') {
         if (!message.isRegex && isProtected(message.hostname, redirectUrl)) {
@@ -95,11 +129,7 @@ chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) =
           sendResponse({ success: false, error: 'Already in the list' });
           return;
         }
-        const updated = [...domains, {
-          hostname: message.hostname,
-          isRegex: message.isRegex ?? false,
-          addedAt: Date.now(),
-        }];
+        const updated = [...domains, { hostname: message.hostname, isRegex: message.isRegex ?? false, addedAt: Date.now() }];
         await saveBlockedDomains(updated);
         await updateRedirectRules(updated, redirectUrl);
         sendResponse({ success: true });
@@ -126,7 +156,6 @@ async function restoreRules() {
   await updateRedirectRules(domains, redirectUrl);
 }
 
-// Re-apply rules whenever the redirect URL changes.
 chrome.storage.onChanged.addListener((changes) => {
   if (changes[REDIRECT_URL_KEY]) restoreRules();
 });

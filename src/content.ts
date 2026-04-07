@@ -11,11 +11,18 @@ const fullUrl = window.location.href;
 
 setup();
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+}
+
 function matchesDomain(domain: BlockedDomain, h: string, url: string): boolean {
   if (domain.isRegex) {
     try { return new RegExp(domain.hostname).test(url); } catch { return false; }
   }
-  return h === domain.hostname || h.endsWith(`.${domain.hostname}`);
+  if (domain.hostname.includes('*')) {
+    return new RegExp(`^${escapeRegex(domain.hostname).replace(/\*/g, '.*')}$`).test(h);
+  }
+  return h === domain.hostname; // exact match — no implicit subdomain matching
 }
 
 async function redirectIfBlocked(): Promise<void> {
@@ -30,12 +37,11 @@ async function redirectIfBlocked(): Promise<void> {
     return;
   }
 
-  // Don't redirect if we're on the redirect target (avoid infinite loop).
-  if (hostname === redirectHostname || hostname.endsWith(`.${redirectHostname}`)) return;
+  // Don't redirect if we're already on the redirect target.
+  if (hostname === redirectHostname) return;
 
-  // Don't redirect if the redirect target itself matches a rule (would cause a loop).
-  const loopDetected = domains.some((d) => matchesDomain(d, redirectHostname, redirectUrl));
-  if (loopDetected) return;
+  // Don't redirect if the redirect target itself matches a rule (loop prevention).
+  if (domains.some((d) => matchesDomain(d, redirectHostname, redirectUrl))) return;
 
   if (domains.some((d) => matchesDomain(d, hostname, fullUrl))) {
     window.location.replace(redirectUrl);
@@ -43,7 +49,6 @@ async function redirectIfBlocked(): Promise<void> {
 }
 
 function setup() {
-  // Fallback for cases where declarativeNetRequest didn't intercept.
   redirectIfBlocked();
 
   // Re-check on BFCache page restore (back/forward navigation).
@@ -51,8 +56,7 @@ function setup() {
     if (event.persisted) redirectIfBlocked();
   });
 
-  // Redirect immediately when storage changes (domain added while on the page,
-  // or redirect URL changed).
+  // Redirect immediately when storage changes.
   chrome.storage.onChanged.addListener((changes) => {
     if (changes[STORAGE_KEY] || changes[REDIRECT_URL_KEY]) redirectIfBlocked();
   });
